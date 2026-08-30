@@ -179,8 +179,13 @@ if [[ -f "$PID_FILE" ]]; then
     fi
 fi
 
-nohup "$NODE_BIN" ai-reminder.js watch --sources codex --interval-ms 1000 \
-    > "$LOG_FILE" 2>&1 &
+if command -v setsid >/dev/null 2>&1; then
+    setsid "$NODE_BIN" ai-reminder.js watch --sources codex --interval-ms 1000 \
+        > "$LOG_FILE" 2>&1 < /dev/null &
+else
+    nohup "$NODE_BIN" ai-reminder.js watch --sources codex --interval-ms 1000 \
+        > "$LOG_FILE" 2>&1 < /dev/null &
+fi
 
 echo $! > "$PID_FILE"
 
