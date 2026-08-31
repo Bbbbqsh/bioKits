@@ -7,9 +7,10 @@ usage() {
   $(basename "$0") [命令] [选项]
 
 命令：
-  start               启动 watcher（默认）
+  start               启动 watcher（默认，内置守护：进程意外退出 5 秒后自动重启）
   stop                终止 watcher
   status              查看 watcher 状态
+  test                自检：watcher 状态 + 测试通知 + 今日日志摘要
 
 选项：
   --home PATH         HOME 目录（默认：$HOME_DIR）
@@ -41,7 +42,7 @@ if [[ $# -gt 0 && "$1" != -* ]]; then
 fi
 
 case "$ACTION" in
-    start|stop|status)
+    start|stop|status|test)
         ;;
     *)
         echo "错误：未知命令 $ACTION" >&2
@@ -97,7 +98,8 @@ is_watcher_running() {
     local pid="$1"
 
     kill -0 "$pid" 2>/dev/null || return 1
-    [[ "$(ps -p "$pid" -o args= 2>/dev/null)" == *"node ai-reminder.js watch"* ]]
+    # 同时匹配 node 进程与守护循环（bash -c 的命令文本里含同样的子串）
+    [[ "$(ps -p "$pid" -o args= 2>/dev/null)" == *"ai-reminder.js watch"* ]]
 }
 
 if [[ "$ACTION" == "stop" ]]; then
@@ -169,6 +171,35 @@ fi
 
 cd "$PROJECT_DIR"
 
+# 自检：确认 watcher 状态、通知渠道连通性和当日活动记录
+if [[ "$ACTION" == "test" ]]; then
+    echo "== 1/3 Watcher 状态 =="
+    if [[ -f "$PID_FILE" ]]; then
+        pid="$(<"$PID_FILE")"
+    fi
+    if [[ "${pid:-}" =~ ^[0-9]+$ ]] && is_watcher_running "$pid"; then
+        echo "Watcher 正在运行，PID：$pid"
+    else
+        echo "Watcher 未运行，请先执行：$(basename "$0") start" >&2
+        exit 1
+    fi
+
+    echo
+    echo "== 2/3 测试通知（飞书群收到消息 = 通知渠道正常）=="
+    "$NODE_BIN" ai-reminder.js notify --source codex --task-info "watcher手动测试 $(date +%H:%M:%S)" --skip-dedupe --force
+
+    echo
+    echo "== 3/3 今日日志摘要 =="
+    today_log="$HOME_DIR/.ai-cli-complete-notify/watch-logs/watch-$(date +%F).log"
+    if [[ -f "$today_log" ]]; then
+        grep -E "sent|skipped" "$today_log" | tail -5 || echo "今日暂无 sent/skipped 记录"
+        echo "完整日志：$today_log"
+    else
+        echo "今日日志不存在：$today_log"
+    fi
+    exit 0
+fi
+
 # 避免重复启动
 if [[ -f "$PID_FILE" ]]; then
     pid="$(<"$PID_FILE")"
@@ -179,12 +210,28 @@ if [[ -f "$PID_FILE" ]]; then
     fi
 fi
 
+# 内置守护循环：node 进程意外退出（崩溃、OOM、磁盘满等）时，5 秒后自动重启，
+# 避免再次出现"进程悄悄死掉、通知静默失效"的情况。重启事件会记录到日志。
+export WATCHER_NODE="$NODE_BIN"
+export WATCHER_LOG="$LOG_FILE"
+
+WATCHER_SUPERVISOR='
+while true; do
+    "$WATCHER_NODE" ai-reminder.js watch --sources codex --interval-ms 1000 >> "$WATCHER_LOG" 2>&1 &
+    child=$!
+    trap "kill $child 2>/dev/null; exit 0" TERM INT
+    wait $child
+    echo "[watchdog] watcher 进程退出（code=$?），5 秒后自动重启" >> "$WATCHER_LOG"
+    sleep 5
+done
+'
+
+: > "$LOG_FILE"
+
 if command -v setsid >/dev/null 2>&1; then
-    setsid "$NODE_BIN" ai-reminder.js watch --sources codex --interval-ms 1000 \
-        > "$LOG_FILE" 2>&1 < /dev/null &
+    setsid bash -c "$WATCHER_SUPERVISOR" < /dev/null &
 else
-    nohup "$NODE_BIN" ai-reminder.js watch --sources codex --interval-ms 1000 \
-        > "$LOG_FILE" 2>&1 < /dev/null &
+    nohup bash -c "$WATCHER_SUPERVISOR" < /dev/null &
 fi
 
 echo $! > "$PID_FILE"
