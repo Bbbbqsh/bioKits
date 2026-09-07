@@ -97,10 +97,57 @@ PID_FILE="${PID_FILE:-$HOME_DIR/.ai-cli-notify.watch.pid}"
 is_watcher_running() {
     local pid="$1"
 
+    [[ "$pid" =~ ^[0-9]+$ ]] && (( pid > 1 )) || return 1
     kill -0 "$pid" 2>/dev/null || return 1
+    [[ "$(ps -p "$pid" -o stat= 2>/dev/null)" != Z* ]] || return 1
     # 同时匹配 node 进程与守护循环（bash -c 的命令文本里含同样的子串）
     [[ "$(ps -p "$pid" -o args= 2>/dev/null)" == *"ai-reminder.js watch"* ]]
 }
+
+# 固定路径，避免 cd 后相对路径指向不同的 PID/日志文件。
+PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd -P)"
+LOG_FILE="$(readlink -m -- "$LOG_FILE")"
+PID_FILE="$(readlink -m -- "$PID_FILE")"
+
+# 串行化 PID 恢复与启动；后台守护进程不继承这把操作锁。
+exec 9> "${PID_FILE}.lock"
+flock -x 9
+
+recover_watcher_pid() {
+    local pid="" candidate comm entry
+    local -a args env_entries matches=()
+    if [[ -f "$PID_FILE" ]]; then
+        pid="$(<"$PID_FILE")"
+        if is_watcher_running "$pid"; then return; fi
+    fi
+
+    # 兼容旧版：PID 文件可能记录了已退出的 setsid，而守护循环仍在运行。
+    while read -r candidate comm; do
+        [[ "$comm" == "bash" ]] || continue
+        [[ "$(readlink "/proc/$candidate/cwd" 2>/dev/null)" == "$PROJECT_DIR" ]] || continue
+        mapfile -d "" -t args < "/proc/$candidate/cmdline" 2>/dev/null || continue
+        [[ "${args[1]:-}" == "-c" ]] || continue
+        [[ "${args[2]:-}" == *'ai-reminder.js watch'* && "${args[2]:-}" == *'wait $child'* ]] || continue
+        mapfile -d "" -t env_entries < "/proc/$candidate/environ" 2>/dev/null || continue
+        for entry in "${env_entries[@]}"; do
+            if [[ "$entry" == "WATCHER_LOG=$LOG_FILE" ]] && is_watcher_running "$candidate"; then
+                matches+=("$candidate")
+                break
+            fi
+        done
+    done < <(ps -u "$(id -u)" -o pid=,comm=)
+
+    if (( ${#matches[@]} > 1 )); then
+        echo "错误：发现多个匹配的 watcher 守护进程：${matches[*]}，请先排查重复进程" >&2
+        exit 1
+    fi
+    if (( ${#matches[@]} == 1 )); then
+        echo "${matches[0]}" > "$PID_FILE"
+        echo "已恢复 watcher PID：${matches[0]}"
+    fi
+}
+
+recover_watcher_pid
 
 if [[ "$ACTION" == "stop" ]]; then
     if [[ ! -f "$PID_FILE" ]]; then
@@ -126,7 +173,7 @@ if [[ "$ACTION" == "stop" ]]; then
 
     kill -TERM "$pid" 2>/dev/null || true
     for _ in {1..10}; do
-        if ! kill -0 "$pid" 2>/dev/null; then
+        if ! is_watcher_running "$pid"; then
             rm -f "$PID_FILE"
             echo "Codex watcher 已终止，PID：$pid"
             exit 0
@@ -215,8 +262,11 @@ fi
 # 避免再次出现"进程悄悄死掉、通知静默失效"的情况。重启事件会记录到日志。
 export WATCHER_NODE="$NODE_BIN"
 export WATCHER_LOG="$LOG_FILE"
+export WATCHER_PID_FILE="$PID_FILE"
 
 WATCHER_SUPERVISOR='
+# setsid 可能再次 fork；由实际守护进程写入自己的 PID。
+echo "$$" > "$WATCHER_PID_FILE" || exit 1
 while true; do
     "$WATCHER_NODE" ai-reminder.js watch --sources codex --interval-ms 1000 >> "$WATCHER_LOG" 2>&1 &
     child=$!
@@ -227,16 +277,27 @@ while true; do
 done
 '
 
-: > "$LOG_FILE"
+# 保留历史日志，并在后台启动前检查日志与 PID 文件是否可写。
+: >> "$LOG_FILE"
+: > "$PID_FILE"
 
 if command -v setsid >/dev/null 2>&1; then
-    setsid bash -c "$WATCHER_SUPERVISOR" < /dev/null &
+    setsid bash -c "$WATCHER_SUPERVISOR" < /dev/null >> "$LOG_FILE" 2>&1 9>&- &
 else
-    nohup bash -c "$WATCHER_SUPERVISOR" < /dev/null &
+    nohup bash -c "$WATCHER_SUPERVISOR" < /dev/null >> "$LOG_FILE" 2>&1 9>&- &
 fi
 
-echo $! > "$PID_FILE"
+# 等待实际 PID 发布，并确认守护进程和 watcher 子进程已存活。
+for _ in {1..20}; do
+    sleep 0.25
+    pid="$(<"$PID_FILE")"
+    if is_watcher_running "$pid" && pgrep -P "$pid" -f 'ai-reminder[.]js watch' > /dev/null; then
+        echo "Codex watcher 已启动，PID: $pid"
+        echo "日志文件：$LOG_FILE"
+        echo "查看日志：tail -f $LOG_FILE"
+        exit 0
+    fi
+done
 
-echo "Codex watcher 已启动，PID: $(cat "$PID_FILE")"
-echo "日志文件：$LOG_FILE"
-echo "查看日志：tail -f $LOG_FILE"
+echo "错误：未确认 watcher 启动成功；守护进程可能仍在重试，请检查日志：$LOG_FILE" >&2
+exit 1
