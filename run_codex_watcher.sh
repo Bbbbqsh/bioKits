@@ -185,8 +185,9 @@ if [[ "$ACTION" == "test" ]]; then
     fi
 
     echo
-    echo "== 2/3 测试通知（飞书群收到消息 = 通知渠道正常）=="
+    echo "== 2/3 测试通知（飞书群收到 codex 和 claude 两条消息 = 通知渠道正常）=="
     "$NODE_BIN" ai-reminder.js notify --source codex --task-info "watcher手动测试 $(date +%H:%M:%S)" --skip-dedupe --force
+    "$NODE_BIN" ai-reminder.js notify --source claude --task-info "claude hook手动测试 $(date +%H:%M:%S)" --skip-dedupe --force
 
     echo
     echo "== 3/3 今日日志摘要 =="
