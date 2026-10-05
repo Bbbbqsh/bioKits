@@ -11,6 +11,7 @@ usage() {
   stop                终止 watcher
   status              查看 watcher 状态
   test                自检：watcher 状态 + 测试通知 + 今日日志摘要
+  update              更新项目仓库（拉取当前分支的上游，仅快进）
 
 选项：
   --home PATH         HOME 目录（默认：$HOME_DIR）
@@ -26,6 +27,7 @@ usage() {
 示例：
   $(basename "$0") start --home /path/to/home
   $(basename "$0") stop --home /path/to/home
+  $(basename "$0") update --project-dir /path/to/ai-cli-complete-notify
 EOF
 }
 
@@ -42,7 +44,7 @@ if [[ $# -gt 0 && "$1" != -* ]]; then
 fi
 
 case "$ACTION" in
-    start|stop|status|test)
+    start|stop|status|test|update)
         ;;
     *)
         echo "错误：未知命令 $ACTION" >&2
@@ -106,6 +108,15 @@ is_watcher_running() {
 
 # 固定路径，避免 cd 后相对路径指向不同的 PID/日志文件。
 PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd -P)"
+
+# 仓库更新不依赖 watcher 状态、PID 锁或 node。
+if [[ "$ACTION" == "update" ]]; then
+    cd "$PROJECT_DIR"
+    echo "正在更新项目仓库：$PROJECT_DIR"
+    git pull --ff-only
+    exit 0
+fi
+
 LOG_FILE="$(readlink -m -- "$LOG_FILE")"
 PID_FILE="$(readlink -m -- "$PID_FILE")"
 
