@@ -34,8 +34,11 @@ fi
 body=$(printf '%s\n\nHost: %s\nDirectory: %s\nCommand: %s\n\nStart: %s\nEnd: %s\nElapsed: %s\nExit code: %d' \
     "$status" "$host" "$workdir" "$command_str" "$start_time" "$end_time" "$elapsed_str" "$exit_code")
 
-apprise \
-    -t "任务通知 | ${host}" \
-    -b "$body" >/dev/null 2>&1
+# 通知失败不能静默，也不能覆盖原任务的退出码。
+if ! command -v apprise >/dev/null 2>&1; then
+    printf 'nr: 无法发送通知：当前 PATH 中找不到 apprise，请检查安装及运行环境。\n' >&2
+elif ! apprise -t "任务通知 | ${host}" -b "$body"; then
+    printf 'nr: 通知发送失败，请检查上方错误及 apprise 配置。\n' >&2
+fi
 
 exit "$exit_code"
